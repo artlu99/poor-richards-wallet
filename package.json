@@ -1,0 +1,16 @@
+{
+  "name": "poor-richards-wallet",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "overwrite-with-new-key": "touch .env && dotenvx set PK `openssl rand -hex 32`",
+    "view-account": "dotenvx run -- bun index.ts"
+  },
+  "dependencies": {
+    "@dotenvx/dotenvx": "latest",
+    "viem": "latest"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  }
+}

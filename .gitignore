@@ -1,0 +1,16 @@
+# dependencies (bun install)
+node_modules
+bun.lock
+
+# secret key (on demand via `bunx dotenvx get PK > secret.key`)
+secret.key
+
+# dotenvx
+.env.keys
+
+# dotenv environment variable files (safe to commit IFF encrypted via dotenvx)
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
