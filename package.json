@@ -3,8 +3,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "overwrite-with-new-key": "touch .env && dotenvx set PK `openssl rand -hex 32`",
+    "overwrite-with-new-key": "umask 077 && touch .env && dotenvx set PK `openssl rand -hex 32` && chmod 600 .env .env.keys",
     "overwrite-with-mixed-key": "bun mix-and-overwrite.ts",
+    "harden-with-drand": "bun harden-and-overwrite.ts",
+    "harden-with-drand-dry-run": "bun harden-and-overwrite.ts --dry-run",
     "view-account": "dotenvx run -- bun index.ts"
   },
   "dependencies": {
