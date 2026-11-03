@@ -1,46 +1,51 @@
 # Poor Richard's Wallet
 
-A simple wallet for EVM chains. You make the key on your computer. The key file stays encrypted on disk. No server holds your key. No third party can restore it.
+A simple wallet for EVM chains. You make the key on your computer. The key file stays encrypted on disk. No server holds your key. Only your backups can restore it.
 
 ## How the key is made
 
-The wallet combines three independent sources of randomness. A slow function mixes them. This design has a goal: if someone later finds one source weak, the other sources keep the key safe.
+The wallet combines a local key with public beacon records selected by a second local random draw. A slow function mixes them. The goal is to tolerate a flaw in one *userspace* random-number path while the other path and the operating-system entropy pool remain sound.
 
-1. **The computer makes part A.** The command `openssl rand -hex 32` makes 32 random bytes. The operating system random number generator makes these bytes. This generator is a CSPRNG. You can audit its code.
+The beacon records are public. They are not a third secret entropy source. Their value comes from the unrecorded choice of records. OpenSSL and Bun's `node:crypto` implementation can share the same operating-system entropy pool, so a failure in that shared pool can weaken both local draws.
 
-2. **The script reads part B from a public beacon.** The League of Entropy runs the drand network. This network publishes a new signed record every 3 seconds. Each record is 48 bytes. The script reads 8 old records from the full published history.
+1. **The computer makes part A.** The command `openssl rand -hex 32` makes 32 random bytes. OpenSSL seeds its random generator from the operating system. Its source code is public, but the installed binary and operating system remain part of the trust base.
 
-3. **A second generator selects the records.** The script selects the 8 record numbers with the Bun and Node random number generator. This generator uses different code from part A. If someone later finds a flaw in one generator, the other generator still holds its randomness.
+2. **The script reads public beacon records.** The League of Entropy runs the drand network. This network publishes a new signed record every 3 seconds. Each signature is 48 bytes. The script reads 8 old records from the range reported by a drand endpoint, excluding a small safety margin.
 
-4. **The script mixes all parts.** The function scrypt combines part A and the 8 signatures. scrypt needs much memory for each call. This property slows all search attacks.
+3. **A second local draw selects the records.** The script selects 8 distinct record numbers with Bun's implementation of the Node `crypto.randomBytes` API. This is a different userspace path from the OpenSSL command. A flaw only in one userspace path does not by itself remove the other source. A flaw in the shared operating-system entropy pool can weaken both.
 
-5. **The script destroys the inputs.** Part A is overwritten. The 8 record numbers are not saved. The final key is the only result.
+4. **The script mixes all parts.** The function scrypt combines part A and the 8 signatures. scrypt needs much memory for each call. This slows attacks that must guess mixer inputs. It does not slow theft of the final key or generic attacks on secp256k1.
+
+5. **The script destroys the inputs.** Part A is overwritten in `.env`. The 8 record numbers are not saved to disk by this program. The final key is the only locally stored result. The drand endpoints receive the requested round numbers and can log them. Anyone who can observe the full request URLs can also learn the selection.
 
 ## Security properties
 
 | Event | Result |
 | --- | --- |
-| Part A generator is later found weak | The 8 signatures protect the key. An attacker must search about 2^200 record combinations. |
-| Part B generator is later found weak | Part A alone gives 256 bits. This is the full strength of an EVM key. |
+| Part A userspace generator is later found weak (OS pool still sound) | The unknown ordered record selection can protect the key. At a verified horizon near 33 million rounds, an attacker who lacks the record numbers faces about 2^200 candidate sequences. |
+| Selection RNG userspace path is later found weak (OS pool still sound) | Part A alone gives 256 bits. This is the full strength of an EVM key. |
+| Shared OS entropy pool is weak or backdoored | Both local sources can fail together. The public beacon does not restore secrecy if part A is known or enumerable. |
 | A beacon record is false | The script checks each signature against the pinned group key. The script stops on the first bad record. |
-| A mirror sends false data | The script reads each record from two mirrors. The records must be identical. |
-| Part A leaks after generation | The attacker still needs the 8 record numbers. They are not written anywhere. |
-| An attacker watches the whole generation | No software can help. Keep the computer safe at that moment. |
+| Both record endpoints respond | Their signatures must be identical and valid. |
+| One record endpoint fails | One valid signature is sufficient; the script still verifies it against the pinned group key. |
+| Part A leaks after generation, and the attacker did not learn the beacon selection | The attacker must search the ordered record selections. |
+| An attacker watches the whole generation or obtains endpoint logs | The requests can reveal the record numbers. Keep the computer and request metadata safe at that moment. |
+| The endpoint reports a false, old “latest” round | The current implementation can draw from a smaller history. The 2^200 estimate therefore assumes an honest, current horizon; production does not yet cross-check it. |
 
-The record numbers are a secret with no storage. You never need them again. The final key alone opens the wallet.
+The record numbers are ephemeral selectors that this program does not store on disk. They are not guaranteed to be unknown to the drand endpoints or a machine observer. You never need them again for normal use. The final key alone opens the wallet. If you lose the key files, the public beacon history does not restore the wallet: part A was destroyed.
 
 ## Limits of this design
 
-This design does not protect a lost file. If you lose `.env` and `.env.keys`, you lose the wallet. There is no recovery. Make backups. Keep them in two places.
+If you lose `.env` and `.env.keys`, you lose the wallet. The public beacon history cannot rebuild Part A after it was destroyed. Make backups of the file pair. Keep copies in more than one place.
 
-This design does not protect a copied key. Anyone with the key file can spend the funds.
+Anyone who has the decrypted key (or both dotenvx files) can spend the funds. dotenvx encrypts the file on disk; it is not a BIP-39 passphrase. Keep `.env.keys` separate from everyday backups of `.env` when you can.
 
 ## Requirements
 
 - [Bun](https://bun.sh) 1.4 or newer
 - [OpenSSL](https://openssl.org) command line tool
 - [dotenvx](https://dotenvx.com) command line tool
-- An internet connection for the beacon step
+- Beacon round numbers and signatures at generation time (today: an internet fetch; authenticated sneakernet/airgap import is possible in principle but not implemented — see `DISCUSSION.md`)
 
 The crypto code uses [viem](https://viem.sh), [valibot](https://valibot.dev), and the [noble](https://github.com/paulmillr/noble-curves) libraries. All code runs locally.
 
@@ -88,7 +93,11 @@ bun run view-account
 bun test
 ```
 
-The suite checks three things. First, the generators: the system random number generator must look uniform. Bad generators, for example a Mersenne Twister, must fail the tests. Second, the beacon: signatures must verify against the pinned group key, and the draw function must stay in range. Third, one test reads the live beacon network.
+The suite checks three areas:
+
+1. **Uniformity (not secrecy).** `openssl rand` output must look uniform. Deliberately biased generators must fail. A full Mersenne Twister stream can still *look* uniform and pass those checks; an under-drawn or bit-masked PRNG must fail. These tests do not prove cryptographic entropy.
+2. **Beacon and mixer.** Signatures verify against the pinned group key. Historical draws stay in range. `hardenKey` (scrypt over part A and scaffolding signatures) is checked for stable, input-sensitive behavior. One test reads the live beacon network.
+3. **File permissions.** Secret files must stay owner-only after the scripts run.
 
 ## Storage rules
 
@@ -100,6 +109,6 @@ The suite checks three things. First, the generators: the system random number g
 
 ## Source of randomness notes
 
-The beacon data is public. Public data adds no secrecy by itself. This design uses it for two properties. First, independence: the beacon is far from your computer. Second, unrecorded selection: the script does not save which records it chose. An attacker who wants to search must try all record combinations, because the selection is unknown and unrecorded.
+The beacon data is public. Public data adds no secrecy by itself. The security contribution comes from selecting an ordered set of records with a local draw and not storing that selection on disk. An attacker who has part A but did not learn the selection must try candidate sequences. The endpoints can observe the requested rounds, so this is not protection against a fully observed ceremony.
 
-The key has 256 bits. An EVM key gives about 128 bits of security. The 8 selected records add about 200 bits against a search. This is more than the key format can use. Do not reduce the number of records.
+The output is 256 bits. secp256k1 gives about 128 bits of security against generic discrete-log attacks. With a trustworthy horizon near 33 million rounds, 8 distinct ordered selections create about a 2^200 candidate-sequence search when the indices remain unknown. This does not add 200 bits of secret entropy to a known or predictable local RNG, and the final key cannot exceed the security of its 256-bit format.
